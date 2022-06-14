@@ -1,0 +1,428 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "tenantid": {
+            "type": "string"
+        },
+        "clientid": {
+            "type": "string"
+        },
+        "clientsecret": {
+            "type": "string"
+        },
+        "subscriptions": {
+            "type": "array"
+        },
+        "connections_azurevm_name": {
+            "type": "string",
+            "defaultValue": "azurevm"
+        },
+        "connections_arm_name": {
+            "defaultValue": "arm",
+            "type": "string"
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_azurevm_name')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "api": {
+                    "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', parameters('connections_azurevm_name'))]",
+                    "type": "Microsoft.Web/locations/managedApis"
+                },
+                "displayName": "[parameters('connections_azurevm_name')]",
+                "parameterValues": {
+                    "token:clientId": "[parameters('clientid')]",
+                    "token:clientSecret": "[parameters('clientsecret')]",
+                    "token:TenantId": "[parameters('tenantid')]",
+                    "token:grantType": "client_credentials"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_arm_name')]",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "api": {
+                    "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', parameters('connections_arm_name'))]",
+                    "type": "Microsoft.Web/locations/managedApis"
+                },
+                "displayName": "[parameters('connections_arm_name')]",
+                "parameterValues": {
+                    "token:clientId": "[parameters('clientid')]",
+                    "token:clientSecret": "[parameters('clientsecret')]",
+                    "token:TenantId": "[parameters('tenantid')]",
+                    "token:grantType": "client_credentials"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "azresource-shutdown",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "state": "Disabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        },
+                        "subscriptions": {
+                            "defaultValue": "[parameters('subscriptions')]",
+                            "type": "Array"
+                        }
+                    },
+                    "triggers": {
+                        "Recurrence": {
+                            "recurrence": {
+                                "frequency": "Day",
+                                "interval": 1,
+                                "schedule": {
+                                    "hours": [
+                                        "22"
+                                    ],
+                                    "minutes": [
+                                        0
+                                    ]
+                                },
+                                "timeZone": "Tokyo Standard Time"
+                            },
+                            "evaluatedRecurrence": {
+                                "frequency": "Day",
+                                "interval": 1,
+                                "schedule": {
+                                    "hours": [
+                                        "22"
+                                    ],
+                                    "minutes": [
+                                        0
+                                    ]
+                                },
+                                "timeZone": "Tokyo Standard Time"
+                            },
+                            "type": "Recurrence"
+                        }
+                    },
+                    "actions": {
+                        "サブスクリプションの一覧でループ": {
+                            "foreach": "@parameters('subscriptions')",
+                            "actions": {
+                                "リソース_グループの一覧表示": {
+                                    "runAfter": {},
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['arm']['connectionId']"
+                                            }
+                                        },
+                                        "method": "get",
+                                        "path": "/subscriptions/@{encodeURIComponent(items('サブスクリプションの一覧でループ'))}/resourcegroups",
+                                        "queries": {
+                                            "x-ms-api-version": "2016-06-01"
+                                        }
+                                    }
+                                },
+                                "リソースグループの一覧でループ": {
+                                    "foreach": "@body('リソース_グループの一覧表示')?['value']",
+                                    "actions": {
+                                        "リソース_グループ別にリソースを一覧表示（リソースの種別でフィルタしてる）": {
+                                            "runAfter": {},
+                                            "type": "ApiConnection",
+                                            "inputs": {
+                                                "host": {
+                                                    "connection": {
+                                                        "name": "@parameters('$connections')['arm']['connectionId']"
+                                                    }
+                                                },
+                                                "method": "get",
+                                                "path": "/subscriptions/@{encodeURIComponent(items('サブスクリプションの一覧でループ'))}/resourceGroups/@{encodeURIComponent(items('リソースグループの一覧でループ')?['name'])}/resources",
+                                                "queries": {
+                                                    "$filter": "resourcetype eq 'Microsoft.Compute/virtualMachines' or resourcetype eq 'Microsoft.DBforMySQL/servers'",
+                                                    "x-ms-api-version": "2016-06-01"
+                                                }
+                                            }
+                                        },
+                                        "リソースの一覧でループ": {
+                                            "foreach": "@body('リソース_グループ別にリソースを一覧表示（リソースの種別でフィルタしてる）')?['value']",
+                                            "actions": {
+                                                "deallocateタグがfalseでないかを判定": {
+                                                    "actions": {
+                                                        "リソースの種別で処理を分岐": {
+                                                            "runAfter": {},
+                                                            "cases": {
+                                                                "Azure_Database_for_MySQLの場合": {
+                                                                    "case": "Microsoft.DBforMySQL/servers",
+                                                                    "actions": {
+                                                                        "Azure_Database_for_MySQLが起動中かどうかを判定": {
+                                                                            "actions": {
+                                                                                "Azure_Database_for_MySQLの停止": {
+                                                                                    "runAfter": {},
+                                                                                    "type": "Http",
+                                                                                    "inputs": {
+                                                                                        "authentication": {
+                                                                                            "audience": "https://management.azure.com",
+                                                                                            "clientId": "[parameters('clientid')]",
+                                                                                            "secret": "[parameters('clientsecret')]",
+                                                                                            "tenant": "[parameters('tenantid')]",
+                                                                                            "type": "ActiveDirectoryOAuth"
+                                                                                        },
+                                                                                        "method": "POST",
+                                                                                        "uri": "https://management.azure.com/subscriptions/@{items('サブスクリプションの一覧でループ')}/resourceGroups/@{items('リソースグループの一覧でループ')?['name']}/providers/Microsoft.DBforMySQL/servers/@{items('リソースの一覧でループ')?['name']}/stop?api-version=2020-01-01"
+                                                                                    }
+                                                                                }
+                                                                            },
+                                                                            "runAfter": {
+                                                                                "JSON_の解析": [
+                                                                                    "Succeeded"
+                                                                                ]
+                                                                            },
+                                                                            "expression": {
+                                                                                "and": [
+                                                                                    {
+                                                                                        "not": {
+                                                                                            "equals": [
+                                                                                                "@body('JSON_の解析')?['properties']?['userVisibleState']",
+                                                                                                "Stopped"
+                                                                                            ]
+                                                                                        }
+                                                                                    }
+                                                                                ]
+                                                                            },
+                                                                            "type": "If"
+                                                                        },
+                                                                        "Azure_Database_for_MySQLの状態を取得": {
+                                                                            "runAfter": {},
+                                                                            "type": "Http",
+                                                                            "inputs": {
+                                                                                "authentication": {
+                                                                                    "audience": "https://management.azure.com",
+                                                                                    "clientId": "@parameters('clientid')",
+                                                                                    "secret": "@parameters('clientsecret')",
+                                                                                    "tenant": "@parameters('tenantid')",
+                                                                                    "type": "ActiveDirectoryOAuth"
+                                                                                },
+                                                                                "method": "GET",
+                                                                                "uri": "https://management.azure.com/subscriptions/@{items('サブスクリプションの一覧でループ')}/resourceGroups/@{items('リソースグループの一覧でループ')?['name']}/providers/Microsoft.DBforMySQL/servers/@{items('リソースの一覧でループ')?['name']}?api-version=2017-12-01"
+                                                                            }
+                                                                        },
+                                                                        "JSON_の解析": {
+                                                                            "runAfter": {
+                                                                                "Azure_Database_for_MySQLの状態を取得": [
+                                                                                    "Succeeded"
+                                                                                ]
+                                                                            },
+                                                                            "type": "ParseJson",
+                                                                            "inputs": {
+                                                                                "content": "@body('Azure_Database_for_MySQLの状態を取得')",
+                                                                                "schema": {
+                                                                                    "properties": {
+                                                                                        "id": {
+                                                                                            "type": "string"
+                                                                                        },
+                                                                                        "location": {
+                                                                                            "type": "string"
+                                                                                        },
+                                                                                        "name": {
+                                                                                            "type": "string"
+                                                                                        },
+                                                                                        "properties": {
+                                                                                            "properties": {
+                                                                                                "administratorLogin": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "byokEnforcement": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "earliestRestoreDate": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "fullyQualifiedDomainName": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "infrastructureEncryption": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "masterServerId": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "minimalTlsVersion": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "privateEndpointConnections": {
+                                                                                                    "type": "array"
+                                                                                                },
+                                                                                                "publicNetworkAccess": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "replicaCapacity": {
+                                                                                                    "type": "integer"
+                                                                                                },
+                                                                                                "replicationRole": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "sslEnforcement": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "storageProfile": {
+                                                                                                    "properties": {
+                                                                                                        "backupRetentionDays": {
+                                                                                                            "type": "integer"
+                                                                                                        },
+                                                                                                        "geoRedundantBackup": {
+                                                                                                            "type": "string"
+                                                                                                        },
+                                                                                                        "storageAutogrow": {
+                                                                                                            "type": "string"
+                                                                                                        },
+                                                                                                        "storageMB": {
+                                                                                                            "type": "integer"
+                                                                                                        }
+                                                                                                    },
+                                                                                                    "type": "object"
+                                                                                                },
+                                                                                                "userVisibleState": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "version": {
+                                                                                                    "type": "string"
+                                                                                                }
+                                                                                            },
+                                                                                            "type": "object"
+                                                                                        },
+                                                                                        "sku": {
+                                                                                            "properties": {
+                                                                                                "capacity": {
+                                                                                                    "type": "integer"
+                                                                                                },
+                                                                                                "family": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "name": {
+                                                                                                    "type": "string"
+                                                                                                },
+                                                                                                "tier": {
+                                                                                                    "type": "string"
+                                                                                                }
+                                                                                            },
+                                                                                            "type": "object"
+                                                                                        },
+                                                                                        "tags": {
+                                                                                            "properties": {},
+                                                                                            "type": "object"
+                                                                                        },
+                                                                                        "type": {
+                                                                                            "type": "string"
+                                                                                        }
+                                                                                    },
+                                                                                    "type": "object"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                },
+                                                                "仮想マシンの場合": {
+                                                                    "case": "Microsoft.Compute/virtualMachines",
+                                                                    "actions": {
+                                                                        "仮想マシンの割り当て解除": {
+                                                                            "runAfter": {},
+                                                                            "type": "ApiConnection",
+                                                                            "inputs": {
+                                                                                "host": {
+                                                                                    "connection": {
+                                                                                        "name": "@parameters('$connections')['azurevm']['connectionId']"
+                                                                                    }
+                                                                                },
+                                                                                "method": "post",
+                                                                                "path": "/subscriptions/@{encodeURIComponent(items('サブスクリプションの一覧でループ'))}/resourcegroups/@{encodeURIComponent(items('リソースグループの一覧でループ')?['name'])}/providers/Microsoft.Compute/virtualMachines/@{encodeURIComponent(items('リソースの一覧でループ')?['name'])}/deallocate",
+                                                                                "queries": {
+                                                                                    "api-version": "2019-12-01"
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            "default": {
+                                                                "actions": {}
+                                                            },
+                                                            "expression": "@items('リソースの一覧でループ')?['type']",
+                                                            "type": "Switch"
+                                                        }
+                                                    },
+                                                    "runAfter": {},
+                                                    "expression": {
+                                                        "and": [
+                                                            {
+                                                                "not": {
+                                                                    "equals": [
+                                                                        "@items('リソースの一覧でループ')?['tags']?['deallocate']",
+                                                                        "false"
+                                                                    ]
+                                                                }
+                                                            }
+                                                        ]
+                                                    },
+                                                    "type": "If"
+                                                }
+                                            },
+                                            "runAfter": {
+                                                "リソース_グループ別にリソースを一覧表示（リソースの種別でフィルタしてる）": [
+                                                    "Succeeded"
+                                                ]
+                                            },
+                                            "type": "Foreach"
+                                        }
+                                    },
+                                    "runAfter": {
+                                        "リソース_グループの一覧表示": [
+                                            "Succeeded"
+                                        ]
+                                    },
+                                    "type": "Foreach"
+                                }
+                            },
+                            "runAfter": {},
+                            "type": "Foreach"
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "arm": {
+                                "connectionId": "[concat(subscription().id, '/resourceGroups/', resourceGroup().name, '/providers/Microsoft.Web/connections/', parameters('connections_arm_name'))]",
+                                "connectionName": "[parameters('connections_arm_name')]",
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', parameters('connections_arm_name'))]"
+                            },
+                            "azurevm": {
+                                "connectionId": "[concat(subscription().id, '/resourceGroups/', resourceGroup().name, '/providers/Microsoft.Web/connections/', parameters('connections_azurevm_name'))]",
+                                "connectionName": "[parameters('connections_azurevm_name')]",
+                                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/', parameters('connections_azurevm_name'))]"
+                            }
+                        }
+                    }
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Web/connections/', parameters('connections_azurevm_name'))]",
+                "[resourceId('Microsoft.Web/connections/', parameters('connections_arm_name'))]"
+            ]
+        }
+    ]
+}
